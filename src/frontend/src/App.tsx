@@ -2211,51 +2211,154 @@ export default function App() {
   const [topicPage, setTopicPage] = useState(0);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const isSpeakingRef = useRef(false);
-  const [isCanvasPlaying, setIsCanvasPlaying] = useState(false);
   const speechRef = useRef<SpeechSynthesisUtterance | null>(null);
   const bgAudioCtxRef = useRef<AudioContext | null>(null);
   const bgMusicIntervalRef = useRef<number | null>(null);
+  const bgMasterGainRef = useRef<GainNode | null>(null);
+  const MUSIC_BASE_GAIN = 0.27;
+  const MUSIC_DUCK_GAIN = 0.23; // ~15% reduction during voice
 
-  const speakLine = (text: string) => {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    const voices = window.speechSynthesis.getVoices();
-    const preferred =
-      voices.find(
-        (v) =>
-          v.lang.startsWith("en") &&
-          (v.name.includes("Google") ||
-            v.name.includes("Natural") ||
-            v.name.includes("Samantha") ||
-            v.name.includes("Daniel")),
-      ) ||
-      voices.find((v) => v.lang.startsWith("en")) ||
-      voices[0];
-    if (preferred) utter.voice = preferred;
-    utter.rate = 0.95;
-    utter.pitch = 1;
-    utter.volume = 1;
-    speechRef.current = utter;
-    window.speechSynthesis.speak(utter);
-  };
+  // handleSpeakLine: called by ReelCanvas to speak each line and notify when done
+  // This drives the voice-based timing — canvas waits for onEnd before advancing
+  const handleSpeakLine = useCallback(
+    (text: string, _rate: number, lineIndex: number, onEnd: () => void) => {
+      if (!window.speechSynthesis) {
+        onEnd();
+        return;
+      }
+      window.speechSynthesis.cancel();
 
-  const speakLineRef = useRef(speakLine);
-  speakLineRef.current = speakLine;
-  const handleLineChange = useCallback(
-    (lineIndex: number) => {
-      if (!isSpeakingRef.current) return;
-      const line = scriptLines[lineIndex];
-      if (line) speakLineRef.current(line);
+      // ── Pause rule: add emphasis pause on at most 1 key word per line ────
+      // Find the single highest-priority word in this line and add ONE comma
+      // pause before it only — keeps flow natural, not over-dramatic.
+      const EMPHASIS_PRIORITY = [
+        "broke",
+        "trap",
+        "debt",
+        "fear",
+        "regret",
+        "stress",
+        "freedom",
+        "discipline",
+        "wealth",
+        "control",
+        "money",
+        "income",
+        "salary",
+        "emi",
+        "savings",
+        "invest",
+        "habit",
+        "rich",
+        "poor",
+        "loan",
+        "risk",
+        "plan",
+        "growth",
+        "reset",
+        "loss",
+        "profit",
+        "free",
+        "save",
+      ];
+
+      // Convert punctuation to natural pauses first
+      let spoken = text
+        .replace(/[—–]/g, ", ")
+        .replace(/\.\.\./, ", ")
+        .replace(/…/g, ", ");
+
+      // Insert ONE pause before the first matching emphasis word in this line
+      let pauseInserted = false;
+      for (const word of EMPHASIS_PRIORITY) {
+        if (pauseInserted) break;
+        const re = new RegExp(`(?<![,.!?\\s])\\s+(${word}(?:[a-z]*))`, "i");
+        if (re.test(spoken)) {
+          spoken = spoken.replace(re, ", $1");
+          pauseInserted = true;
+        }
+      }
+
+      // Trim doubled commas
+      spoken = spoken.replace(/,\s*,/g, ",").trim();
+
+      const utter = new SpeechSynthesisUtterance(spoken);
+
+      // ── Voice selection: warm, expressive, non-robotic ───────────────────
+      const voices = window.speechSynthesis.getVoices();
+      const preferred =
+        voices.find((v) => v.name === "Google UK English Female") ||
+        voices.find((v) => v.name === "Samantha") ||
+        voices.find((v) => v.name === "Google US English") ||
+        voices.find(
+          (v) =>
+            v.lang.startsWith("en") &&
+            (v.name.includes("Natural") || v.name.includes("Premium")),
+        ) ||
+        voices.find(
+          (v) =>
+            v.lang.startsWith("en") && v.name.toLowerCase().includes("female"),
+        ) ||
+        voices.find((v) => v.lang.startsWith("en-IN")) ||
+        voices.find((v) => v.lang.startsWith("en")) ||
+        voices[0];
+      if (preferred) utter.voice = preferred;
+
+      // ── Per-section tone adjustment ──────────────────────────────────────
+      // lineIndex: 0=Hook, 1=Problem, 2=Insight, 3=Solution, 4=Closure, 5=CTA
+      // Subtle pitch/rate shifts — avoid robotic extremes
+      const SECTION_TONE = [
+        { pitch: 1.12, rate: 0.92 }, // Hook:    engaging, slightly stronger
+        { pitch: 1.02, rate: 0.88 }, // Problem: slightly serious, measured
+        { pitch: 1.05, rate: 0.9 }, // Insight: calm, explanatory
+        { pitch: 1.1, rate: 0.92 }, // Solution: confident
+        { pitch: 1.0, rate: 0.85 }, // Closure:  slower, impactful
+        { pitch: 1.12, rate: 0.93 }, // CTA:      clear, slightly energetic
+      ];
+      const tone = SECTION_TONE[
+        Math.min(lineIndex, SECTION_TONE.length - 1)
+      ] ?? { pitch: 1.08, rate: 0.9 };
+
+      utter.rate = tone.rate;
+      utter.pitch = tone.pitch;
+      utter.volume = 0.87;
+
+      // Duck music slightly while voice plays
+      if (bgMasterGainRef.current && bgAudioCtxRef.current) {
+        bgMasterGainRef.current.gain.linearRampToValueAtTime(
+          MUSIC_DUCK_GAIN,
+          bgAudioCtxRef.current.currentTime + 0.1,
+        );
+      }
+      const wrappedOnEnd = () => {
+        // Restore music gain after voice ends
+        if (bgMasterGainRef.current && bgAudioCtxRef.current) {
+          bgMasterGainRef.current.gain.linearRampToValueAtTime(
+            MUSIC_BASE_GAIN,
+            bgAudioCtxRef.current.currentTime + 0.15,
+          );
+        }
+        onEnd();
+      };
+      utter.onend = wrappedOnEnd;
+      utter.onerror = wrappedOnEnd;
+      speechRef.current = utter;
+      window.speechSynthesis.speak(utter);
     },
-    [scriptLines],
+    [],
   );
 
-  // ── Background Music: 3 rotating styles ──────────────────
-  // Style 0: Calm ambient (long sine pads, slow movement)
-  // Style 1: Slightly emotional (piano-like sine+triangle, minor feel)
-  // Style 2: Light motivational (subtle rhythmic pulse)
-  const bgMusicStyleRef = useRef<number>(0);
+  // onLineChange is kept for compatibility but no longer drives voice
+  const handleLineChange = useCallback((_lineIndex: number) => {
+    // Voice timing is now driven by ReelCanvas via onSpeakLine
+    // Nothing to do here
+  }, []);
+
+  // ── Background Music: 3 richer styles with variation ──────
+  // Style 0: Calm Ambient (soft pads, slow harmonic movement)
+  // Style 1: Emotional Piano (melodic minor progressions, light variation)
+  // Style 2: Motivational Light Beat (pentatonic melody + subtle rhythm)
+  const bgMusicStyleRef = useRef<number>(-1); // -1 = no previous style
 
   const startBgMusic = () => {
     if (bgMusicIntervalRef.current) {
@@ -2280,19 +2383,23 @@ export default function App() {
     const ctx = new AudioCtx();
     bgAudioCtxRef.current = ctx;
 
-    // Randomly select one style per reel
-    const style = Math.floor(Math.random() * 3);
+    // Pick a style that is NOT the same as the previous one
+    let style: number;
+    do {
+      style = Math.floor(Math.random() * 3);
+    } while (style === bgMusicStyleRef.current);
     bgMusicStyleRef.current = style;
 
-    // Master gain — music always at 30% so voice is dominant
+    // Master gain — music at ~27% base
     const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.3, ctx.currentTime);
+    masterGain.gain.setValueAtTime(MUSIC_BASE_GAIN, ctx.currentTime);
     masterGain.connect(ctx.destination);
+    bgMasterGainRef.current = masterGain;
 
-    // Soft low-pass filter to keep everything non-distracting
+    // Gentle filter — keep music clear but soft (not muffled)
     const lpf = ctx.createBiquadFilter();
     lpf.type = "lowpass";
-    lpf.frequency.setValueAtTime(1200, ctx.currentTime);
+    lpf.frequency.setValueAtTime(5000, ctx.currentTime);
     lpf.connect(masterGain);
 
     const scheduleNote = (
@@ -2309,9 +2416,9 @@ export default function App() {
       gain.gain.setValueAtTime(0, time);
       gain.gain.linearRampToValueAtTime(
         peakVol,
-        time + Math.min(0.5, duration * 0.25),
+        time + Math.min(0.4, duration * 0.2),
       );
-      gain.gain.linearRampToValueAtTime(peakVol * 0.7, time + duration * 0.7);
+      gain.gain.linearRampToValueAtTime(peakVol * 0.75, time + duration * 0.65);
       gain.gain.linearRampToValueAtTime(0, time + duration);
       osc.connect(gain);
       gain.connect(lpf);
@@ -2319,108 +2426,176 @@ export default function App() {
       osc.stop(time + duration + 0.05);
     };
 
-    let loopDuration = 8;
-
     if (style === 0) {
-      // ── Style 0: Calm ambient — long, slow sine pads ────────
-      // C major: C4 E4 G4 played slowly as drones
-      const ambientNotes = [261.63, 329.63, 392.0, 523.25];
-      const noteDur = 4.0;
-      const scheduleLoop = (startTime: number) => {
-        ambientNotes.forEach((freq, i) => {
-          scheduleNote(startTime + i * 0.6, freq, noteDur, "sine", 0.08);
-        });
-        // Soft bass pad
-        scheduleNote(startTime, 130.81, noteDur * 2, "sine", 0.1);
-      };
-      loopDuration = 4;
-      scheduleLoop(ctx.currentTime);
-      scheduleLoop(ctx.currentTime + loopDuration);
-      bgMusicIntervalRef.current = window.setInterval(() => {
-        if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
-          scheduleLoop(ctx.currentTime + loopDuration);
-        }
-      }, loopDuration * 1000);
-    } else if (style === 1) {
-      // ── Style 1: Emotional piano — sine+triangle, minor chord feel ──
-      // Am - F - C - G (soft piano simulation)
-      const progressions = [
-        { freqs: [220.0, 261.63, 329.63], dur: 2.2 }, // Am
-        { freqs: [174.61, 220.0, 261.63], dur: 2.2 }, // F
-        { freqs: [261.63, 329.63, 392.0], dur: 2.2 }, // C
-        { freqs: [196.0, 246.94, 293.66], dur: 2.2 }, // G
+      // ── Style 0: Calm Ambient — drifting pads with slow harmonic shifts ──
+      // Alternates between two pad colours every ~5–6 seconds to avoid monotony
+      const padSets = [
+        // C major pad: C3 G3 C4 E4
+        [
+          [130.81, 5.5],
+          [196.0, 5.0],
+          [261.63, 5.0],
+          [329.63, 4.5],
+        ],
+        // Am pad: A2 E3 A3 C4
+        [
+          [110.0, 5.5],
+          [164.81, 5.0],
+          [220.0, 5.0],
+          [261.63, 4.5],
+        ],
+        // F major pad: F2 C3 F3 A3
+        [
+          [87.31, 5.5],
+          [130.81, 5.0],
+          [174.61, 5.0],
+          [220.0, 4.5],
+        ],
       ];
-      loopDuration = progressions.reduce((s, c) => s + c.dur, 0);
-      const scheduleLoop = (startTime: number) => {
-        let t = startTime;
-        for (const chord of progressions) {
-          for (const freq of chord.freqs) {
-            scheduleNote(t, freq, chord.dur, "sine", 0.07);
-            // Add triangle layer half a beat later for "piano" attack
-            scheduleNote(t + 0.05, freq, chord.dur * 0.6, "triangle", 0.04);
-          }
-          // Soft bass note
-          scheduleNote(t, chord.freqs[0] / 2, chord.dur, "sine", 0.09);
-          t += chord.dur;
-        }
+      const BLOCK = 6; // seconds per block
+      let blockIdx = 0;
+      const scheduleBlock = (startTime: number, idx: number) => {
+        const set = padSets[idx % padSets.length];
+        set.forEach(([freq, dur], i) => {
+          scheduleNote(startTime + i * 0.5, freq, dur as number, "sine", 0.17);
+        });
+        // Sub-bass drone for depth
+        scheduleNote(
+          startTime,
+          (set[0][0] as number) * 0.5,
+          BLOCK,
+          "sine",
+          0.14,
+        );
+        // Soft shimmer on top
+        scheduleNote(
+          startTime + 1.5,
+          (set[2][0] as number) * 2,
+          3.5,
+          "sine",
+          0.06,
+        );
       };
-      scheduleLoop(ctx.currentTime);
-      scheduleLoop(ctx.currentTime + loopDuration);
+      scheduleBlock(ctx.currentTime, blockIdx);
       bgMusicIntervalRef.current = window.setInterval(() => {
         if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
-          scheduleLoop(ctx.currentTime + loopDuration);
+          blockIdx++;
+          scheduleBlock(ctx.currentTime + 0.1, blockIdx);
         }
-      }, loopDuration * 1000);
-    } else {
-      // ── Style 2: Light motivational — subtle rhythmic pulse ──
-      // C major pentatonic, gentle off-beat pulse pattern
-      const pentatonic = [261.63, 293.66, 329.63, 392.0, 440.0];
-      const stepDur = 0.5;
-      const pattern = [0, 2, 4, 2, 1, 3, 4, 3]; // indices into pentatonic
-      loopDuration = pattern.length * stepDur;
-      const scheduleLoop = (startTime: number) => {
-        pattern.forEach((noteIdx, i) => {
-          const freq = pentatonic[noteIdx];
-          // Alternating octaves for gentle rhythm feel
-          const octave = i % 3 === 0 ? 0.5 : 1;
+      }, BLOCK * 1000);
+    } else if (style === 1) {
+      // ── Style 1: Emotional Piano — melodic lines with chord variation ──
+      // Two alternating progressions to avoid identical repetition
+      const progressionA = [
+        { freqs: [220.0, 277.18, 329.63], bass: 110.0, dur: 1.6 }, // Am
+        { freqs: [196.0, 246.94, 293.66], bass: 98.0, dur: 1.6 }, // G
+        { freqs: [174.61, 220.0, 261.63], bass: 87.31, dur: 1.6 }, // F
+        { freqs: [196.0, 261.63, 329.63], bass: 98.0, dur: 1.6 }, // G/B
+      ];
+      const progressionB = [
+        { freqs: [261.63, 329.63, 392.0], bass: 130.81, dur: 1.6 }, // C
+        { freqs: [220.0, 261.63, 329.63], bass: 110.0, dur: 1.6 }, // Am
+        { freqs: [174.61, 220.0, 277.18], bass: 87.31, dur: 1.6 }, // Fmaj7
+        { freqs: [196.0, 246.94, 329.63], bass: 98.0, dur: 1.6 }, // G7
+      ];
+      const progressions = [progressionA, progressionB];
+      const PROG_DUR = progressionA.reduce((s, c) => s + c.dur, 0); // ~6.4s
+      let progIdx = 0;
+      const scheduleProgression = (startTime: number, idx: number) => {
+        const prog = progressions[idx % 2];
+        let t = startTime;
+        for (const chord of prog) {
+          for (const freq of chord.freqs) {
+            // Main sine pad
+            scheduleNote(t, freq, chord.dur * 0.9, "sine", 0.14);
+            // Slight triangle attack for piano character
+            scheduleNote(t + 0.04, freq, chord.dur * 0.45, "triangle", 0.09);
+          }
+          // Melodic top note offset for variety
           scheduleNote(
-            startTime + i * stepDur,
-            freq * octave,
-            stepDur * 0.8,
+            t + 0.2,
+            chord.freqs[2] * 1.5,
+            chord.dur * 0.5,
             "sine",
             0.07,
           );
-          // Very soft harmonic
-          scheduleNote(
-            startTime + i * stepDur,
-            freq * 1.5 * octave,
-            stepDur * 0.5,
-            "sine",
-            0.025,
-          );
-        });
-        // Bass pulse every beat
-        for (let b = 0; b < 4; b++) {
-          scheduleNote(
-            startTime + b * stepDur,
-            130.81,
-            stepDur * 0.6,
-            "sine",
-            0.08,
-          );
+          // Warm bass
+          scheduleNote(t, chord.bass, chord.dur, "sine", 0.16);
+          t += chord.dur;
         }
       };
-      scheduleLoop(ctx.currentTime);
-      scheduleLoop(ctx.currentTime + loopDuration);
+      scheduleProgression(ctx.currentTime, progIdx);
       bgMusicIntervalRef.current = window.setInterval(() => {
         if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
-          scheduleLoop(ctx.currentTime + loopDuration);
+          progIdx++;
+          scheduleProgression(ctx.currentTime + 0.05, progIdx);
         }
-      }, loopDuration * 1000);
+      }, PROG_DUR * 1000);
+    } else {
+      // ── Style 2: Motivational Light Beat — pentatonic melody + gentle pulse ──
+      // Pattern alternates between two melodic phrases every ~5 seconds
+      const pentatonic = [261.63, 293.66, 329.63, 392.0, 440.0, 523.25];
+      const phraseA = [0, 2, 4, 2, 0, 3, 2, 4]; // brighter
+      const phraseB = [1, 0, 2, 3, 2, 4, 1, 0]; // slightly different contour
+      const phrases = [phraseA, phraseB];
+      const STEP = 0.55;
+      const PHRASE_DUR = 8 * STEP; // ~4.4s
+      let phraseIdx = 0;
+      const schedulePhrase = (startTime: number, idx: number) => {
+        const phrase = phrases[idx % 2];
+        phrase.forEach((noteIdx, i) => {
+          const freq = pentatonic[noteIdx];
+          const octaveMod = i % 4 === 0 ? 0.5 : 1; // drop octave on beat 1 & 5
+          scheduleNote(
+            startTime + i * STEP,
+            freq * octaveMod,
+            STEP * 0.75,
+            "sine",
+            0.15,
+          );
+          // Harmonic shimmer on off-beats
+          if (i % 2 === 1) {
+            scheduleNote(
+              startTime + i * STEP + 0.05,
+              freq * 1.5,
+              STEP * 0.4,
+              "sine",
+              0.06,
+            );
+          }
+        });
+        // Gentle kick-like sub on beat 1 and 5
+        for (const beat of [0, 4]) {
+          scheduleNote(
+            startTime + beat * STEP,
+            65.41,
+            STEP * 0.5,
+            "sine",
+            0.18,
+          );
+        }
+        // Off-beat accent (beat 3)
+        scheduleNote(startTime + 2 * STEP, 98.0, STEP * 0.45, "triangle", 0.1);
+        // Walking bass line
+        const bassLine = [
+          130.81, 146.83, 164.81, 146.83, 130.81, 110.0, 130.81, 146.83,
+        ];
+        bassLine.forEach((bFreq, i) => {
+          scheduleNote(startTime + i * STEP, bFreq, STEP * 0.7, "sine", 0.13);
+        });
+      };
+      schedulePhrase(ctx.currentTime, phraseIdx);
+      bgMusicIntervalRef.current = window.setInterval(() => {
+        if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
+          phraseIdx++;
+          schedulePhrase(ctx.currentTime + 0.05, phraseIdx);
+        }
+      }, PHRASE_DUR * 1000);
     }
   };
 
   const stopBgMusic = (fadeDuration = 0.75) => {
+    bgMasterGainRef.current = null;
     if (bgMusicIntervalRef.current) {
       clearInterval(bgMusicIntervalRef.current);
       bgMusicIntervalRef.current = null;
@@ -2456,58 +2631,13 @@ export default function App() {
     setIsSpeaking(false);
   };
 
-  const startVoiceWithCanvas = (lines: string[]) => {
+  const startVoiceWithCanvas = (_lines: string[]) => {
     isSpeakingRef.current = true;
     setIsSpeaking(true);
     startBgMusic();
-    // canvas onLineChange(0) fires right when animation starts and will speak line 0
-    // If canvas not playing, speak sequentially as fallback
-    if (!isCanvasPlaying && lines.length > 0) {
-      speakLine(lines[0]);
-      const speakNext = (index: number) => {
-        if (!isSpeakingRef.current) return;
-        if (index >= lines.length) {
-          isSpeakingRef.current = false;
-          setIsSpeaking(false);
-          return;
-        }
-        const utter = new SpeechSynthesisUtterance(lines[index]);
-        const voices = window.speechSynthesis.getVoices();
-        const preferred =
-          voices.find(
-            (v) =>
-              v.lang.startsWith("en") &&
-              (v.name.includes("Google") ||
-                v.name.includes("Natural") ||
-                v.name.includes("Samantha") ||
-                v.name.includes("Daniel")),
-          ) ||
-          voices.find((v) => v.lang.startsWith("en")) ||
-          voices[0];
-        if (preferred) utter.voice = preferred;
-        utter.rate = 0.95;
-        utter.pitch = 1;
-        utter.volume = 1;
-        utter.onend = () => {
-          setTimeout(() => speakNext(index + 1), 750);
-        };
-        utter.onerror = () => {
-          setTimeout(() => speakNext(index + 1), 750);
-        };
-        window.speechSynthesis.speak(utter);
-      };
-      if (lines.length > 1) {
-        const firstUtter = speechRef.current;
-        if (firstUtter) {
-          firstUtter.onend = () => {
-            setTimeout(() => speakNext(1), 750);
-          };
-          firstUtter.onerror = () => {
-            setTimeout(() => speakNext(1), 750);
-          };
-        }
-      }
-    }
+    // Voice timing is now fully driven by ReelCanvas via onSpeakLine prop.
+    // ReelCanvas speaks each line and waits for the actual voice duration
+    // before advancing — no fallback sequential speaking needed here.
   };
 
   const generateScript = useGenerateScript();
@@ -2531,6 +2661,7 @@ export default function App() {
     setReelKey((k) => k + 1);
     isSpeakingRef.current = true;
     setIsSpeaking(true);
+    startBgMusic();
     setAutoPlay(true);
     toast.success(`"${topicData.topic}" reel ready!`);
   };
@@ -2551,6 +2682,7 @@ export default function App() {
       setReelKey((k) => k + 1);
       isSpeakingRef.current = true;
       setIsSpeaking(true);
+      startBgMusic();
       setAutoPlay(true);
       toast.success("Script ready! Starting preview...");
     } catch {
@@ -2568,6 +2700,7 @@ export default function App() {
       setReelKey((k) => k + 1);
       isSpeakingRef.current = true;
       setIsSpeaking(true);
+      startBgMusic();
       setAutoPlay(true);
       toast.success("Script ready! Starting preview...");
     }
@@ -2588,6 +2721,7 @@ export default function App() {
     setReelKey((k) => k + 1);
     isSpeakingRef.current = true;
     setIsSpeaking(true);
+    startBgMusic();
     setAutoPlay(true);
     toast.success("Your script is ready! Starting preview...");
   };
@@ -2958,10 +3092,14 @@ export default function App() {
                   autoPlay={autoPlay}
                   onAutoPlayStarted={() => {
                     setAutoPlay(false);
-                    setIsCanvasPlaying(true);
                   }}
                   onLineChange={handleLineChange}
-                  onPlayComplete={() => setIsCanvasPlaying(false)}
+                  onPlayComplete={() => {
+                    stopBgMusic();
+                    isSpeakingRef.current = false;
+                    setIsSpeaking(false);
+                  }}
+                  onSpeakLine={isSpeaking ? handleSpeakLine : undefined}
                 />
               </div>
             </motion.div>

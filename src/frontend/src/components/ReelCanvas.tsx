@@ -12,6 +12,12 @@ interface ReelCanvasProps {
   onAutoPlayStarted?: () => void;
   onLineChange?: (lineIndex: number) => void;
   onPlayComplete?: () => void;
+  onSpeakLine?: (
+    text: string,
+    rate: number,
+    lineIndex: number,
+    onEnd: () => void,
+  ) => void;
 }
 
 const MONEY_KEYWORDS = [
@@ -98,14 +104,6 @@ const CANVAS_WIDTH = 405;
 const CANVAS_HEIGHT = 720;
 const RECORD_WIDTH = 1080;
 const RECORD_HEIGHT = 1920;
-
-// Timing constants (ms)
-const LINE_DURATION = 1800; // total time per line
-const FADE_IN_MS = 250; // fade-in duration
-const FADE_OUT_MS = 250; // fade-out duration
-// Gap between lines — next line starts ONLY after previous alpha = 0
-// The fade-out window is the last FADE_OUT_MS of LINE_DURATION
-// So there is no overlap by design.
 
 // Safe zones — stay inside header/footer
 const SAFE_TOP_BASE = 80; // px at scale=1 (header is 58px)
@@ -374,6 +372,7 @@ export default function ReelCanvas({
   onAutoPlayStarted,
   onLineChange,
   onPlayComplete,
+  onSpeakLine,
 }: ReelCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number | null>(null);
@@ -527,10 +526,12 @@ export default function ReelCanvas({
   const slideImagesRef = useRef(slideImages);
   const onLineChangeRef = useRef(onLineChange);
   const onPlayCompleteRef = useRef(onPlayComplete);
+  const onSpeakLineRef = useRef(onSpeakLine);
   bgVideoRef.current = bgVideo;
   slideImagesRef.current = slideImages;
   onLineChangeRef.current = onLineChange;
   onPlayCompleteRef.current = onPlayComplete;
+  onSpeakLineRef.current = onSpeakLine;
 
   const playAnimation = useCallback(
     (onDone?: () => void) => {
@@ -547,28 +548,109 @@ export default function ReelCanvas({
       }
       if (animRef.current) cancelAnimationFrame(animRef.current);
 
+      // ── Voice-driven timing constants ─────────────────────
+      const HOOK_MIN_MS = 3000; // Hook stays visible at least 3 seconds
+      const FADE_IN_MS = 200; // Fast fade-in when line appears
+      const FADE_OUT_MS = 250; // Fade-out before advancing
+      const POST_VOICE_PAUSE_MS = 500; // 0.5s pause after voice finishes
+
       let lineIndex = 0;
-      let lineStart = performance.now();
       let slideIndex = 0;
+      let lineStartTime = performance.now();
+
+      // Voice timing state — shared between render loop and voice callbacks
+      let voiceFinished = false;
+      let voiceFinishTime = 0;
+      let advanceScheduled = false;
+      // Generation counter prevents stale callbacks from firing after stop/replay
+      let voiceGeneration = 0;
+
       setIsPlaying(true);
       onLineChangeRef.current?.(0);
 
+      const speakCurrentLine = () => {
+        const gen = ++voiceGeneration;
+        const text = lines[lineIndex];
+        const isHook = lineIndex === 0;
+        const minDurationMs = isHook ? HOOK_MIN_MS : 0;
+
+        voiceFinished = false;
+        voiceFinishTime = 0;
+        advanceScheduled = false;
+
+        const onVoiceEnd = () => {
+          // Discard if this is a stale callback from a previous play session
+          if (gen !== voiceGeneration) return;
+          const now = performance.now();
+          const elapsed = now - lineStartTime;
+          const remaining = Math.max(0, minDurationMs - elapsed);
+          if (remaining > 0) {
+            // Extend display to meet minimum (Hook: 3s)
+            setTimeout(() => {
+              if (gen !== voiceGeneration) return;
+              voiceFinished = true;
+              voiceFinishTime = performance.now();
+            }, remaining);
+          } else {
+            voiceFinished = true;
+            voiceFinishTime = now;
+          }
+        };
+
+        if (onSpeakLineRef.current) {
+          // Voice-driven timing: speak at 0.9x, advance only after voice ends
+          onSpeakLineRef.current(text, 0.9, lineIndex, onVoiceEnd);
+        } else {
+          // No voice provider: use fixed fallback duration
+          const fallback = isHook ? HOOK_MIN_MS : 2200;
+          setTimeout(onVoiceEnd, fallback);
+        }
+      };
+
+      speakCurrentLine();
+
       const render = (now: number) => {
         try {
-          const elapsed = now - lineStart;
+          const elapsed = now - lineStartTime;
 
-          // Fade in for first FADE_IN_MS, fade out for last FADE_OUT_MS
+          // Alpha: fade in quickly, stay at 1 while voice speaks,
+          // then fade out 0.5s after voice ends
           let alpha = 1;
           if (elapsed < FADE_IN_MS) {
             alpha = elapsed / FADE_IN_MS;
-          } else if (elapsed > LINE_DURATION - FADE_OUT_MS) {
-            alpha = Math.max(
-              0,
-              1 - (elapsed - (LINE_DURATION - FADE_OUT_MS)) / FADE_OUT_MS,
-            );
           }
 
-          const progress = Math.min(elapsed / LINE_DURATION, 1);
+          if (voiceFinished) {
+            const sinceVoiceEnd = now - voiceFinishTime;
+            if (sinceVoiceEnd >= POST_VOICE_PAUSE_MS) {
+              const fadeElapsed = sinceVoiceEnd - POST_VOICE_PAUSE_MS;
+              if (fadeElapsed >= FADE_OUT_MS) {
+                // Advance to next line
+                if (!advanceScheduled) {
+                  advanceScheduled = true;
+                  lineIndex++;
+                  slideIndex++;
+                  lineStartTime = now;
+                  if (lineIndex >= lines.length) {
+                    setIsPlaying(false);
+                    setHasPlayed(true);
+                    onDone?.();
+                    onPlayCompleteRef.current?.();
+                    return;
+                  }
+                  onLineChangeRef.current?.(lineIndex);
+                  speakCurrentLine();
+                }
+                alpha = 0;
+              } else {
+                // Fading out
+                alpha = 1 - fadeElapsed / FADE_OUT_MS;
+              }
+            }
+            // In pause window (POST_VOICE_PAUSE_MS not yet elapsed): keep alpha = 1
+          }
+
+          const progress = Math.min(elapsed / 3000, 1);
           const currentText = lines[lineIndex] || "";
           const isCTA = lineIndex === lines.length - 1;
           const curVideo = bgVideoRef.current;
@@ -599,21 +681,6 @@ export default function ReelCanvas({
               progress,
               RECORD_WIDTH / CANVAS_WIDTH,
             );
-          }
-
-          // Advance to next line ONLY after this line's alpha reaches 0
-          if (elapsed >= LINE_DURATION) {
-            lineIndex++;
-            slideIndex++;
-            lineStart = now;
-            if (lineIndex >= lines.length) {
-              setIsPlaying(false);
-              setHasPlayed(true);
-              onDone?.();
-              onPlayCompleteRef.current?.();
-              return;
-            }
-            onLineChangeRef.current?.(lineIndex);
           }
 
           animRef.current = requestAnimationFrame(render);
