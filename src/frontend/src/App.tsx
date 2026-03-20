@@ -2213,6 +2213,8 @@ export default function App() {
   const isSpeakingRef = useRef(false);
   const [isCanvasPlaying, setIsCanvasPlaying] = useState(false);
   const speechRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const bgAudioCtxRef = useRef<AudioContext | null>(null);
+  const bgMusicIntervalRef = useRef<number | null>(null);
 
   const speakLine = (text: string) => {
     if (!window.speechSynthesis) return;
@@ -2249,7 +2251,96 @@ export default function App() {
     [scriptLines],
   );
 
+  const startBgMusic = () => {
+    if (bgMusicIntervalRef.current) {
+      clearInterval(bgMusicIntervalRef.current);
+      bgMusicIntervalRef.current = null;
+    }
+    if (bgAudioCtxRef.current) {
+      bgAudioCtxRef.current.close();
+      bgAudioCtxRef.current = null;
+    }
+
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    bgAudioCtxRef.current = ctx;
+
+    const masterGain = ctx.createGain();
+    masterGain.gain.setValueAtTime(0.3, ctx.currentTime);
+    masterGain.connect(ctx.destination);
+
+    const playChord = (time: number, freqs: number[], duration: number) => {
+      for (const freq of freqs) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, time);
+        gain.gain.setValueAtTime(0, time);
+        gain.gain.linearRampToValueAtTime(0.12, time + 0.4);
+        gain.gain.linearRampToValueAtTime(0.08, time + duration - 0.6);
+        gain.gain.linearRampToValueAtTime(0, time + duration);
+        osc.connect(gain);
+        gain.connect(masterGain);
+        osc.start(time);
+        osc.stop(time + duration + 0.1);
+      }
+    };
+
+    const progression = [
+      [261.63, 329.63, 392.0],
+      [220.0, 261.63, 329.63],
+      [174.61, 220.0, 261.63],
+      [196.0, 246.94, 293.66],
+    ];
+
+    const chordDuration = 2.2;
+    const loopDuration = progression.length * chordDuration;
+
+    const scheduleLoop = (startTime: number) => {
+      progression.forEach((chord, i) => {
+        playChord(startTime + i * chordDuration, chord, chordDuration + 0.3);
+      });
+    };
+
+    scheduleLoop(ctx.currentTime);
+    scheduleLoop(ctx.currentTime + loopDuration);
+
+    bgMusicIntervalRef.current = window.setInterval(() => {
+      if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
+        scheduleLoop(ctx.currentTime + loopDuration);
+      }
+    }, loopDuration * 1000);
+  };
+
+  const stopBgMusic = () => {
+    if (bgMusicIntervalRef.current) {
+      clearInterval(bgMusicIntervalRef.current);
+      bgMusicIntervalRef.current = null;
+    }
+    if (bgAudioCtxRef.current) {
+      const ctx = bgAudioCtxRef.current;
+      try {
+        const fadeGain = ctx.createGain();
+        fadeGain.gain.setValueAtTime(1, ctx.currentTime);
+        fadeGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+      } catch {
+        // ignore
+      }
+      setTimeout(() => {
+        if (bgAudioCtxRef.current === ctx) {
+          ctx.close().catch(() => {});
+          bgAudioCtxRef.current = null;
+        }
+      }, 600);
+    }
+  };
+
   const stopVoice = () => {
+    stopBgMusic();
     window.speechSynthesis.cancel();
     isSpeakingRef.current = false;
     setIsSpeaking(false);
@@ -2258,6 +2349,7 @@ export default function App() {
   const startVoiceWithCanvas = (lines: string[]) => {
     isSpeakingRef.current = true;
     setIsSpeaking(true);
+    startBgMusic();
     // canvas onLineChange(0) fires right when animation starts and will speak line 0
     // If canvas not playing, speak sequentially as fallback
     if (!isCanvasPlaying && lines.length > 0) {
