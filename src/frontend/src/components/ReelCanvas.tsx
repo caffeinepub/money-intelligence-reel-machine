@@ -10,6 +10,8 @@ interface ReelCanvasProps {
   lines: string[];
   autoPlay?: boolean;
   onAutoPlayStarted?: () => void;
+  onLineChange?: (lineIndex: number) => void;
+  onPlayComplete?: () => void;
 }
 
 const MONEY_KEYWORDS = [
@@ -370,6 +372,8 @@ export default function ReelCanvas({
   lines: rawLines,
   autoPlay = false,
   onAutoPlayStarted,
+  onLineChange,
+  onPlayComplete,
 }: ReelCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number | null>(null);
@@ -521,8 +525,12 @@ export default function ReelCanvas({
 
   const bgVideoRef = useRef(bgVideo);
   const slideImagesRef = useRef(slideImages);
+  const onLineChangeRef = useRef(onLineChange);
+  const onPlayCompleteRef = useRef(onPlayComplete);
   bgVideoRef.current = bgVideo;
   slideImagesRef.current = slideImages;
+  onLineChangeRef.current = onLineChange;
+  onPlayCompleteRef.current = onPlayComplete;
 
   const playAnimation = useCallback(
     (onDone?: () => void) => {
@@ -543,6 +551,7 @@ export default function ReelCanvas({
       let lineStart = performance.now();
       let slideIndex = 0;
       setIsPlaying(true);
+      onLineChangeRef.current?.(0);
 
       const render = (now: number) => {
         try {
@@ -601,8 +610,10 @@ export default function ReelCanvas({
               setIsPlaying(false);
               setHasPlayed(true);
               onDone?.();
+              onPlayCompleteRef.current?.();
               return;
             }
+            onLineChangeRef.current?.(lineIndex);
           }
 
           animRef.current = requestAnimationFrame(render);

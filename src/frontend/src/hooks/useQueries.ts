@@ -1,4 +1,4 @@
-import { formatToScript } from "@/lib/utils";
+import { formatToScript } from "@/lib/scriptUtils";
 import { useMutation } from "@tanstack/react-query";
 import { useActor } from "./useActor";
 
