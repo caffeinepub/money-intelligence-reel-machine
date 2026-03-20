@@ -1,0 +1,72 @@
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Bricolage+Grotesque:wght@400;600;700;800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 14.5 0.022 246;
+    --foreground: 95.2 0.008 246;
+    --card: 18.5 0.028 246;
+    --card-foreground: 95.2 0.008 246;
+    --popover: 18.5 0.028 246;
+    --popover-foreground: 95.2 0.008 246;
+    --primary: 78 0.14 85;
+    --primary-foreground: 14.5 0.022 246;
+    --secondary: 25 0.03 246;
+    --secondary-foreground: 80 0.01 246;
+    --muted: 22 0.025 246;
+    --muted-foreground: 62 0.012 246;
+    --accent: 78 0.14 85;
+    --accent-foreground: 14.5 0.022 246;
+    --destructive: 55 0.2 25;
+    --destructive-foreground: 95.2 0.008 246;
+    --border: 26 0.03 246;
+    --input: 26 0.03 246;
+    --ring: 78 0.14 85;
+    --radius: 0.75rem;
+    --chart-1: 78 0.14 85;
+    --chart-2: 60 0.12 200;
+    --chart-3: 70 0.1 160;
+    --chart-4: 65 0.15 40;
+    --chart-5: 75 0.13 320;
+  }
+
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Plus Jakarta Sans", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+@layer utilities {
+  .gold-glow {
+    box-shadow: 0 0 20px oklch(78% 0.14 85 / 0.25), 0 4px 16px
+      oklch(78% 0.14 85 / 0.15);
+  }
+  .card-glow {
+    box-shadow: 0 0 0 1px oklch(26% 0.03 246), 0 8px 32px
+      oklch(8% 0.02 246 / 0.6);
+  }
+  .gold-text {
+    background: linear-gradient(135deg, #ffd700 0%, #e1c15a 50%, #ffd700 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .phone-shadow {
+    box-shadow: 0 25px 60px oklch(5% 0.02 246 / 0.8), 0 0 0 1px
+      oklch(26% 0.03 246);
+  }
+}
