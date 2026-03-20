@@ -2251,13 +2251,23 @@ export default function App() {
     [scriptLines],
   );
 
+  // ── Background Music: 3 rotating styles ──────────────────
+  // Style 0: Calm ambient (long sine pads, slow movement)
+  // Style 1: Slightly emotional (piano-like sine+triangle, minor feel)
+  // Style 2: Light motivational (subtle rhythmic pulse)
+  const bgMusicStyleRef = useRef<number>(0);
+
   const startBgMusic = () => {
     if (bgMusicIntervalRef.current) {
       clearInterval(bgMusicIntervalRef.current);
       bgMusicIntervalRef.current = null;
     }
     if (bgAudioCtxRef.current) {
-      bgAudioCtxRef.current.close();
+      try {
+        bgAudioCtxRef.current.close();
+      } catch {
+        /* ignore */
+      }
       bgAudioCtxRef.current = null;
     }
 
@@ -2266,57 +2276,151 @@ export default function App() {
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext;
     if (!AudioCtx) return;
+
     const ctx = new AudioCtx();
     bgAudioCtxRef.current = ctx;
 
+    // Randomly select one style per reel
+    const style = Math.floor(Math.random() * 3);
+    bgMusicStyleRef.current = style;
+
+    // Master gain — music always at 30% so voice is dominant
     const masterGain = ctx.createGain();
     masterGain.gain.setValueAtTime(0.3, ctx.currentTime);
     masterGain.connect(ctx.destination);
 
-    const playChord = (time: number, freqs: number[], duration: number) => {
-      for (const freq of freqs) {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(freq, time);
-        gain.gain.setValueAtTime(0, time);
-        gain.gain.linearRampToValueAtTime(0.12, time + 0.4);
-        gain.gain.linearRampToValueAtTime(0.08, time + duration - 0.6);
-        gain.gain.linearRampToValueAtTime(0, time + duration);
-        osc.connect(gain);
-        gain.connect(masterGain);
-        osc.start(time);
-        osc.stop(time + duration + 0.1);
-      }
+    // Soft low-pass filter to keep everything non-distracting
+    const lpf = ctx.createBiquadFilter();
+    lpf.type = "lowpass";
+    lpf.frequency.setValueAtTime(1200, ctx.currentTime);
+    lpf.connect(masterGain);
+
+    const scheduleNote = (
+      time: number,
+      freq: number,
+      duration: number,
+      type: OscillatorType,
+      peakVol: number,
+    ) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, time);
+      gain.gain.setValueAtTime(0, time);
+      gain.gain.linearRampToValueAtTime(
+        peakVol,
+        time + Math.min(0.5, duration * 0.25),
+      );
+      gain.gain.linearRampToValueAtTime(peakVol * 0.7, time + duration * 0.7);
+      gain.gain.linearRampToValueAtTime(0, time + duration);
+      osc.connect(gain);
+      gain.connect(lpf);
+      osc.start(time);
+      osc.stop(time + duration + 0.05);
     };
 
-    const progression = [
-      [261.63, 329.63, 392.0],
-      [220.0, 261.63, 329.63],
-      [174.61, 220.0, 261.63],
-      [196.0, 246.94, 293.66],
-    ];
+    let loopDuration = 8;
 
-    const chordDuration = 2.2;
-    const loopDuration = progression.length * chordDuration;
-
-    const scheduleLoop = (startTime: number) => {
-      progression.forEach((chord, i) => {
-        playChord(startTime + i * chordDuration, chord, chordDuration + 0.3);
-      });
-    };
-
-    scheduleLoop(ctx.currentTime);
-    scheduleLoop(ctx.currentTime + loopDuration);
-
-    bgMusicIntervalRef.current = window.setInterval(() => {
-      if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
-        scheduleLoop(ctx.currentTime + loopDuration);
-      }
-    }, loopDuration * 1000);
+    if (style === 0) {
+      // ── Style 0: Calm ambient — long, slow sine pads ────────
+      // C major: C4 E4 G4 played slowly as drones
+      const ambientNotes = [261.63, 329.63, 392.0, 523.25];
+      const noteDur = 4.0;
+      const scheduleLoop = (startTime: number) => {
+        ambientNotes.forEach((freq, i) => {
+          scheduleNote(startTime + i * 0.6, freq, noteDur, "sine", 0.08);
+        });
+        // Soft bass pad
+        scheduleNote(startTime, 130.81, noteDur * 2, "sine", 0.1);
+      };
+      loopDuration = 4;
+      scheduleLoop(ctx.currentTime);
+      scheduleLoop(ctx.currentTime + loopDuration);
+      bgMusicIntervalRef.current = window.setInterval(() => {
+        if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
+          scheduleLoop(ctx.currentTime + loopDuration);
+        }
+      }, loopDuration * 1000);
+    } else if (style === 1) {
+      // ── Style 1: Emotional piano — sine+triangle, minor chord feel ──
+      // Am - F - C - G (soft piano simulation)
+      const progressions = [
+        { freqs: [220.0, 261.63, 329.63], dur: 2.2 }, // Am
+        { freqs: [174.61, 220.0, 261.63], dur: 2.2 }, // F
+        { freqs: [261.63, 329.63, 392.0], dur: 2.2 }, // C
+        { freqs: [196.0, 246.94, 293.66], dur: 2.2 }, // G
+      ];
+      loopDuration = progressions.reduce((s, c) => s + c.dur, 0);
+      const scheduleLoop = (startTime: number) => {
+        let t = startTime;
+        for (const chord of progressions) {
+          for (const freq of chord.freqs) {
+            scheduleNote(t, freq, chord.dur, "sine", 0.07);
+            // Add triangle layer half a beat later for "piano" attack
+            scheduleNote(t + 0.05, freq, chord.dur * 0.6, "triangle", 0.04);
+          }
+          // Soft bass note
+          scheduleNote(t, chord.freqs[0] / 2, chord.dur, "sine", 0.09);
+          t += chord.dur;
+        }
+      };
+      scheduleLoop(ctx.currentTime);
+      scheduleLoop(ctx.currentTime + loopDuration);
+      bgMusicIntervalRef.current = window.setInterval(() => {
+        if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
+          scheduleLoop(ctx.currentTime + loopDuration);
+        }
+      }, loopDuration * 1000);
+    } else {
+      // ── Style 2: Light motivational — subtle rhythmic pulse ──
+      // C major pentatonic, gentle off-beat pulse pattern
+      const pentatonic = [261.63, 293.66, 329.63, 392.0, 440.0];
+      const stepDur = 0.5;
+      const pattern = [0, 2, 4, 2, 1, 3, 4, 3]; // indices into pentatonic
+      loopDuration = pattern.length * stepDur;
+      const scheduleLoop = (startTime: number) => {
+        pattern.forEach((noteIdx, i) => {
+          const freq = pentatonic[noteIdx];
+          // Alternating octaves for gentle rhythm feel
+          const octave = i % 3 === 0 ? 0.5 : 1;
+          scheduleNote(
+            startTime + i * stepDur,
+            freq * octave,
+            stepDur * 0.8,
+            "sine",
+            0.07,
+          );
+          // Very soft harmonic
+          scheduleNote(
+            startTime + i * stepDur,
+            freq * 1.5 * octave,
+            stepDur * 0.5,
+            "sine",
+            0.025,
+          );
+        });
+        // Bass pulse every beat
+        for (let b = 0; b < 4; b++) {
+          scheduleNote(
+            startTime + b * stepDur,
+            130.81,
+            stepDur * 0.6,
+            "sine",
+            0.08,
+          );
+        }
+      };
+      scheduleLoop(ctx.currentTime);
+      scheduleLoop(ctx.currentTime + loopDuration);
+      bgMusicIntervalRef.current = window.setInterval(() => {
+        if (bgAudioCtxRef.current === ctx && ctx.state !== "closed") {
+          scheduleLoop(ctx.currentTime + loopDuration);
+        }
+      }, loopDuration * 1000);
+    }
   };
 
-  const stopBgMusic = () => {
+  const stopBgMusic = (fadeDuration = 0.75) => {
     if (bgMusicIntervalRef.current) {
       clearInterval(bgMusicIntervalRef.current);
       bgMusicIntervalRef.current = null;
@@ -2324,18 +2428,24 @@ export default function App() {
     if (bgAudioCtxRef.current) {
       const ctx = bgAudioCtxRef.current;
       try {
+        // Route everything through a fade-out gain for smooth ending
         const fadeGain = ctx.createGain();
         fadeGain.gain.setValueAtTime(1, ctx.currentTime);
-        fadeGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+        fadeGain.gain.linearRampToValueAtTime(
+          0,
+          ctx.currentTime + fadeDuration,
+        );
+        fadeGain.connect(ctx.destination);
       } catch {
-        // ignore
+        /* ignore */
       }
+      const closeDelay = Math.ceil((fadeDuration + 0.1) * 1000);
       setTimeout(() => {
         if (bgAudioCtxRef.current === ctx) {
           ctx.close().catch(() => {});
           bgAudioCtxRef.current = null;
         }
-      }, 600);
+      }, closeDelay);
     }
   };
 
